@@ -1,0 +1,31 @@
+name: Daily Trading Report
+
+on:
+  schedule:
+    - cron: '0 2 * * 1-5'   # UTC 02:00 = 台灣/香港 10:00
+    - cron: '0 14 * * 1-5'  # UTC 14:00 = 台灣/香港 22:00
+  workflow_dispatch:
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install yfinance numpy pandas
+      
+      - name: Run trading agent
+        env:
+          EMAIL_SENDER: shirleyliu0118@gmail.com
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: shirleyliu0118@gmail.com
+        run: python trading_agent.py
