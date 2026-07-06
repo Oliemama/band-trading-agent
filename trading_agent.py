@@ -26,9 +26,9 @@ HOLDINGS = {
     "0300.HK": {"market": "HK", "name": "美的集團", "type": "stable"},
 }
 
-EMAIL_SENDER = "shirleyliu0118@gmail.com"
-EMAIL_PASSWORD = "snoc hcny ysqf voms"
-EMAIL_RECEIVER = "shirleyliu0118@gmail.com"
+EMAIL_SENDER = os.environ.get('EMAIL_SENDER', 'shirleyliu0118@gmail.com')
+EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')
+EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER', 'shirleyliu0118@gmail.com')
 EMAIL_SMTP_SERVER = "smtp.gmail.com"
 EMAIL_SMTP_PORT = 587
 
