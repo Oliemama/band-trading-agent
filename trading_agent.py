@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-低買高賣波段操盤 Agent - 多指標共振版
+低買高賣波段操盤 Agent - 多指標共振版 v2
 結合：布林通道 + RSI + MACD + 成交量確認
 """
 
@@ -22,7 +22,7 @@ HOLDINGS = {
     "MCD":  {"market": "US", "name": "麥當勞", "type": "stable"},
     "SPCX": {"market": "US", "name": "SpaceX", "type": "high_volatility"},
     "BE":   {"market": "US", "name": "Bloom Energy", "type": "high_volatility"},
-    "BRK.B": {"market": "US", "name": "伯克希爾-B", "type": "stable"},
+    "BRK-B": {"market": "US", "name": "伯克希爾-B", "type": "stable"},
     "TSM":  {"market": "US", "name": "台積電", "type": "stable"},
     "PLTR": {"market": "US", "name": "Palantir", "type": "high_volatility"},
     "PANW": {"market": "US", "name": "Palo Alto Networks", "type": "stable"},
@@ -43,10 +43,10 @@ STOP_LOSS_PCT = 0.05
 VOLUME_THRESHOLD = 1.5
 
 # 指標門檻
-RSI_OVERSOLD = 35      # RSI 超賣門檻
-RSI_OVERBOUGHT = 70    # RSI 超買門檻
-BB_POSITION_LOW = 0.10  # 布林下軌 10% 範圍內
-BB_POSITION_HIGH = 0.90 # 布林上軌 10% 範圍內
+RSI_OVERSOLD = 35
+RSI_OVERBOUGHT = 70
+BB_POSITION_LOW = 0.10
+BB_POSITION_HIGH = 0.90
 
 # ==================== 資料抓取 ====================
 def fetch_stock_data(ticker, period="1y"):
@@ -54,6 +54,7 @@ def fetch_stock_data(ticker, period="1y"):
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
         if df.empty:
+            print(f"   ⚠️ {ticker} 無資料回傳（可能代碼錯誤或未上市）")
             return None
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         df.columns = ['open', 'high', 'low', 'close', 'volume']
@@ -64,25 +65,20 @@ def fetch_stock_data(ticker, period="1y"):
 
 # ==================== 技術指標計算 ====================
 def calculate_bollinger_bands(df, window=20, num_std=2):
-    """計算布林通道"""
     sma = df['close'].rolling(window=window).mean()
     std = df['close'].rolling(window=window).std()
     upper = sma + (std * num_std)
     lower = sma - (std * num_std)
-    
-    # 計算股價在布林通道中的位置 (0=下軌, 1=上軌)
     bb_position = (df['close'] - lower) / (upper - lower)
-    
     return {
         'sma20': sma,
         'upper': upper,
         'lower': lower,
         'bb_position': bb_position,
-        'bandwidth': (upper - lower) / sma  # 通道寬度
+        'bandwidth': (upper - lower) / sma
     }
 
 def calculate_rsi(df, window=14):
-    """計算 RSI"""
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
@@ -91,13 +87,11 @@ def calculate_rsi(df, window=14):
     return rsi
 
 def calculate_macd(df, fast=12, slow=26, signal=9):
-    """計算 MACD"""
     ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
     ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     histogram = macd_line - signal_line
-    
     return {
         'macd': macd_line,
         'signal': signal_line,
@@ -106,22 +100,15 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
 
 # ==================== 多指標共振分析 ====================
 def analyze_multi_indicator(df):
-    """
-    綜合布林通道 + RSI + MACD 分析
-    回傳共振信號
-    """
     if df is None or len(df) < 60:
         return None
     
-    # 計算指標
     bb = calculate_bollinger_bands(df)
     rsi = calculate_rsi(df)
     macd = calculate_macd(df)
     
     current = df['close'].iloc[-1]
-    prev = df['close'].iloc[-2]
     
-    # 最新值
     bb_pos = bb['bb_position'].iloc[-1]
     bb_lower = bb['lower'].iloc[-1]
     bb_upper = bb['upper'].iloc[-1]
@@ -132,61 +119,43 @@ def analyze_multi_indicator(df):
     hist_val = macd['histogram'].iloc[-1]
     prev_hist = macd['histogram'].iloc[-2]
     
-    # ===== 買入共振條件 =====
+    # 買入共振條件
     buy_signals = []
-    
-    # 1. 布林通道：股價接近或觸及下軌
     if bb_pos < BB_POSITION_LOW:
         buy_signals.append("觸及布林下軌")
     elif bb_pos < 0.20:
         buy_signals.append("接近布林下軌")
-    
-    # 2. RSI：超賣
     if rsi_val < RSI_OVERSOLD:
         buy_signals.append(f"RSI超賣({rsi_val:.1f})")
     elif rsi_val < 40:
         buy_signals.append(f"RSI偏低({rsi_val:.1f})")
-    
-    # 3. MACD：黃金交叉或背離
     if macd_val > signal_val and macd['macd'].iloc[-2] <= macd['signal'].iloc[-2]:
         buy_signals.append("MACD黃金交叉")
     elif hist_val > prev_hist and hist_val < 0:
         buy_signals.append("MACD柱狀翻正")
-    
-    # 4. 價格相對均線
     if current < bb_sma * 0.95:
         buy_signals.append("低於均線5%")
     
-    # ===== 賣出共振條件 =====
+    # 賣出共振條件
     sell_signals = []
-    
-    # 1. 布林通道：股價接近或觸及上軌
     if bb_pos > BB_POSITION_HIGH:
         sell_signals.append("觸及布林上軌")
     elif bb_pos > 0.80:
         sell_signals.append("接近布林上軌")
-    
-    # 2. RSI：超買
     if rsi_val > RSI_OVERBOUGHT:
         sell_signals.append(f"RSI超買({rsi_val:.1f})")
     elif rsi_val > 65:
         sell_signals.append(f"RSI偏高({rsi_val:.1f})")
-    
-    # 3. MACD：死亡交叉
     if macd_val < signal_val and macd['macd'].iloc[-2] >= macd['signal'].iloc[-2]:
         sell_signals.append("MACD死亡交叉")
     elif hist_val < prev_hist and hist_val > 0:
         sell_signals.append("MACD柱狀翻負")
-    
-    # 4. 價格相對均線
     if current > bb_sma * 1.05:
         sell_signals.append("高於均線5%")
     
-    # ===== 判斷共振強度 =====
     buy_strength = len(buy_signals)
     sell_strength = len(sell_signals)
     
-    # 決定階段
     if buy_strength >= 3:
         stage = "strong_buy"
         stage_desc = "強烈買入信號"
@@ -209,7 +178,6 @@ def analyze_multi_indicator(df):
         stage = "neutral"
         stage_desc = "中性觀望"
     
-    # 計算中期支撐/壓力（用於止損參考）
     mid = df.tail(90)
     support = np.percentile(mid['low'].values, 3)
     resistance = np.percentile(mid['high'].values, 97)
@@ -241,7 +209,6 @@ def fetch_nyse_advances_declines():
         advances = 0
         declines = 0
         total = 0
-        
         for name, ticker in indices.items():
             try:
                 idx = yf.Ticker(ticker)
@@ -256,7 +223,6 @@ def fetch_nyse_advances_declines():
                         declines += 1
             except:
                 continue
-        
         if declines == 0 or total == 0:
             return 1.0
         return advances / declines
@@ -290,13 +256,10 @@ def check_stop_loss(current_price, support_line, stop_loss_pct=STOP_LOSS_PCT):
 def check_volume_confirmation(df, lookback=20):
     if df is None or len(df) < lookback + 5:
         return False, 0.0
-    
     recent_volume = df['volume'].iloc[-5:].mean()
     avg_volume = df['volume'].iloc[-lookback:-5].mean()
-    
     if avg_volume == 0:
         return False, 0.0
-    
     volume_ratio = recent_volume / avg_volume
     return volume_ratio > VOLUME_THRESHOLD, round(volume_ratio, 2)
 
@@ -304,59 +267,42 @@ def check_volume_confirmation(df, lookback=20):
 def backtest_strategy(ticker, info, period="2y"):
     print(f"\n📈 回測: {ticker} ({info.get('name', '')}) - 過去 {period}")
     print("-" * 40)
-    
     df = fetch_stock_data(ticker, period=period)
     if df is None or len(df) < 200:
         print("   ❌ 資料不足")
         return None
-    
     signals = []
-    
     for i in range(60, len(df) - 30, 5):
         window = df.iloc[:i]
         current = df['close'].iloc[i]
-        
-        # 計算指標
         bb = calculate_bollinger_bands(window)
         rsi = calculate_rsi(window)
         macd = calculate_macd(window)
-        
         bb_pos = bb['bb_position'].iloc[-1]
         rsi_val = rsi.iloc[-1]
         macd_val = macd['macd'].iloc[-1]
         signal_val = macd['signal'].iloc[-1]
-        hist_val = macd['histogram'].iloc[-1]
-        prev_hist = macd['histogram'].iloc[-2]
-        
-        # 買入條件
         buy_count = 0
         if bb_pos < 0.20: buy_count += 1
         if rsi_val < 40: buy_count += 1
         if macd_val > signal_val and macd['macd'].iloc[-2] <= macd['signal'].iloc[-2]: buy_count += 1
-        
-        # 賣出條件
         sell_count = 0
         if bb_pos > 0.80: sell_count += 1
         if rsi_val > 65: sell_count += 1
         if macd_val < signal_val and macd['macd'].iloc[-2] >= macd['signal'].iloc[-2]: sell_count += 1
-        
         future_idx = min(i + 30, len(df) - 1)
         future_price = df['close'].iloc[future_idx]
         ret = (future_price - current) / current * 100
-        
         if buy_count >= 2:
             signals.append({'type': 'buy', 'return': round(ret, 2)})
         elif sell_count >= 2:
             signals.append({'type': 'sell', 'return': round(ret, 2)})
-    
     if not signals:
         print("   ⚠️ 無明確交易信號")
         return None
-    
     returns = [s['return'] for s in signals]
     buy_signals = [s for s in signals if s['type'] == 'buy']
     sell_signals = [s for s in signals if s['type'] == 'sell']
-    
     result = {
         'ticker': ticker,
         'name': info.get('name', ticker),
@@ -368,11 +314,9 @@ def backtest_strategy(ticker, info, period="2y"):
         'buy_avg': round(np.mean([s['return'] for s in buy_signals]), 2) if buy_signals else 0,
         'sell_avg': round(np.mean([s['return'] for s in sell_signals]), 2) if sell_signals else 0,
     }
-    
     print(f"   總信號: {result['total_signals']} (買{result['buy_signals']}/賣{result['sell_signals']})")
     print(f"   勝率: {result['win_rate']}%")
     print(f"   平均報酬: {result['avg_return']}%")
-    
     return result
 
 # ==================== 郵件通知 ====================
@@ -400,7 +344,6 @@ def send_email(subject, body):
 def format_daily_report(results, adr_info=None):
     now = datetime.now().strftime("%Y/%m/%d %H:%M")
     lines = [f"📊 波段管家日報（多指標共振版）{now}", "=" * 50]
-    
     if adr_info:
         lines.append(f"🌡️ 市場情緒 (真實 ADR): {adr_info['emoji']} {adr_info['adr']:.2f}")
         lines.append(f"   {adr_info['description']}")
@@ -466,18 +409,15 @@ def format_daily_report(results, adr_info=None):
             lines.append(f"      布林: 下軌${r['bb_lower']:.2f} | 上軌${r['bb_upper']:.2f}")
             lines.append(f"      位置: {r['bb_position']*100:.1f}% (0=下軌, 100=上軌)")
             lines.append(f"      MACD: {r['macd_histogram']:.3f}")
-            
             if r['buy_signals']:
                 lines.append(f"   🟢 買入條件滿足: {', '.join(r['buy_signals'])}")
             if r['sell_signals']:
                 lines.append(f"   🔴 賣出條件滿足: {', '.join(r['sell_signals'])}")
-            
             if 'volume_ratio' in r:
                 if r.get('volume_confirmed'):
                     lines.append(f"   ✅ 成交量: {r['volume_ratio']}倍放量")
                 else:
                     lines.append(f"   📊 成交量: {r['volume_ratio']}倍")
-            
             if r['stage'] == 'weak_buy':
                 lines.append(f"   ⏳ 建議: 弱買入信號，可觀察等待更強信號")
             elif r['stage'] == 'weak_sell':
@@ -494,10 +434,8 @@ def format_daily_report(results, adr_info=None):
 def format_backtest_report(backtest_results):
     now = datetime.now().strftime("%Y/%m/%d")
     lines = [f"📊 波段管家 - 回測報告 {now}", "=" * 40]
-    
     total_wins = 0
     total_trades = 0
-    
     for result in backtest_results:
         if result is None:
             continue
@@ -508,12 +446,10 @@ def format_backtest_report(backtest_results):
         lines.append(f"   買入平均: {result['buy_avg']}% | 賣出平均: {result['sell_avg']}%")
         total_wins += int(result['win_rate'] * result['total_signals'] / 100)
         total_trades += result['total_signals']
-    
     if total_trades > 0:
         overall_win_rate = total_wins / total_trades * 100
         lines.append(f"\n{'=' * 40}")
         lines.append(f"📊 綜合勝率: {overall_win_rate:.1f}% ({total_wins}/{total_trades})")
-    
     lines.append(f"\n💡 回測僅供參考，過去績效不代表未來結果")
     return "\n".join(lines)
 
@@ -533,14 +469,14 @@ def analyze_single_stock(ticker, info):
     print(f"\n📊 分析: {ticker} ({info.get('name', '')})")
     df = fetch_stock_data(ticker, period="1y")
     if df is None:
-        print("   ❌ 無法取得資料")
+        print(f"   ❌ {ticker} 無法取得資料，跳過")
         return None
     
     result = analyze_multi_indicator(df)
     if result is None:
+        print(f"   ❌ {ticker} 指標計算失敗，跳過")
         return None
     
-    # 加入基本資訊
     result['ticker'] = ticker
     result['name'] = info.get('name', ticker)
     result['stage_emoji'] = get_stage_emoji(result['stage'])
@@ -560,13 +496,11 @@ def analyze_single_stock(ticker, info):
     result['volume_ratio'] = vol_ratio
     
     print(f"   現價: ${result['current']:.2f}")
-    print(f"   📊 指標:")
-    print(f"      RSI: {result['rsi']} | 布林位置: {result['bb_position']*100:.1f}%")
-    print(f"      MACD柱: {result['macd_histogram']:.3f}")
+    print(f"   📊 指標: RSI:{result['rsi']} | 布林:{result['bb_position']*100:.1f}% | MACD:{result['macd_histogram']:.3f}")
     if result['buy_signals']:
-        print(f"   🟢 買入信號: {' + '.join(result['buy_signals'])}")
+        print(f"   🟢 買入: {' + '.join(result['buy_signals'])}")
     if result['sell_signals']:
-        print(f"   🔴 賣出信號: {' + '.join(result['sell_signals'])}")
+        print(f"   🔴 賣出: {' + '.join(result['sell_signals'])}")
     print(f"   狀態: {result['stage_emoji']} {result['stage_desc']}")
     
     return result
@@ -578,14 +512,21 @@ def run_daily_check():
     print("=" * 60)
     
     results = []
+    failed_tickers = []
     
     for ticker, info in HOLDINGS.items():
         result = analyze_single_stock(ticker, info)
         if result:
             results.append(result)
+        else:
+            failed_tickers.append(ticker)
+    
+    if failed_tickers:
+        print(f"\n⚠️ 以下股票無法取得資料: {', '.join(failed_tickers)}")
+        print("   可能原因: 代碼錯誤、未上市、或資料源問題")
     
     if not results:
-        print("❌ 分析失敗")
+        print("❌ 所有股票分析失敗")
         return
     
     adr_value = fetch_nyse_advances_declines()
