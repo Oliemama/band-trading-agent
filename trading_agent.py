@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-低買高賣波段操盤 Agent - 強化版
+低買高賣波段操盤 Agent - 多時間框架強化版
 根據上岡正明《日本最強散戶贏家教你低買高賣的波段操盤術》
 
 強化功能：
-1. 真實 ADR - 接入 NYSE/NASDAQ 漲跌家數
-2. 回測功能 - 驗證過去 1-2 年箱型策略績效
-3. 止損機制 - 跌破支撐線 5% 自動提醒
-4. 成交量確認 - 突破時配合成交量放大
+1. 多時間框架支撐（短期/中期/長期/均線）
+2. 真實 ADR（接入 NYSE/NASDAQ 漲跌家數）
+3. 回測功能（驗證過去 1-2 年箱型策略績效）
+4. 止損機制（跌破有效支撐 5% 自動提醒）
+5. 成交量確認（突破時配合成交量放大）
 """
 
 import os
@@ -21,7 +22,6 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 # ==================== 設定區 ====================
-# 股票清單
 HOLDINGS = {
     "LITE": {"market": "US", "name": "Lumentum", "type": "high_volatility"},
     "GOOG": {"market": "US", "name": "谷歌-C", "type": "stable"},
@@ -40,21 +40,17 @@ HOLDINGS = {
     "0300.HK": {"market": "HK", "name": "美的集團", "type": "stable"},
 }
 
-# 郵件設定（優先使用環境變數，適用於 GitHub Actions）
 EMAIL_SENDER = os.environ.get('EMAIL_SENDER', 'shirleyliu0118@gmail.com')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')
 EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER', 'shirleyliu0118@gmail.com')
 EMAIL_SMTP_SERVER = "smtp.gmail.com"
 EMAIL_SMTP_PORT = 587
 
-# 止損設定
-STOP_LOSS_PCT = 0.05  # 跌破支撐線 5% 止損
-
-# 成交量確認設定
-VOLUME_THRESHOLD = 1.5  # 突破需大於均量 1.5 倍
+STOP_LOSS_PCT = 0.05
+VOLUME_THRESHOLD = 1.5
 
 # ==================== 資料抓取 ====================
-def fetch_stock_data(ticker, period="6mo"):
+def fetch_stock_data(ticker, period="1y"):
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
@@ -67,60 +63,102 @@ def fetch_stock_data(ticker, period="6mo"):
         print(f"❌ {ticker} 資料抓取失敗: {e}")
         return None
 
-# ==================== 箱型分析 ====================
-def analyze_box_pattern(df, period_days=90):
-    if df is None or len(df) < 20:
+# ==================== 多時間框架分析 ====================
+def analyze_multi_timeframe(df):
+    """
+    分析多個時間框架的支撐/壓力線
+    自動選擇最有效的支撐線
+    """
+    if df is None or len(df) < 60:
         return None
-    recent = df.tail(period_days)
-    resistance = np.percentile(recent['high'].values, 97)
-    support = np.percentile(recent['low'].values, 3)
+    
     current = df['close'].iloc[-1]
-    box_range = resistance - support
+    
+    # 短期（30天）
+    short = df.tail(30)
+    short_support = np.percentile(short['low'].values, 5)
+    short_resistance = np.percentile(short['high'].values, 95)
+    
+    # 中期（90天）
+    mid = df.tail(90)
+    mid_support = np.percentile(mid['low'].values, 3)
+    mid_resistance = np.percentile(mid['high'].values, 97)
+    
+    # 長期（180天）
+    long = df.tail(min(180, len(df)))
+    long_support = np.percentile(long['low'].values, 3)
+    long_resistance = np.percentile(long['high'].values, 97)
+    
+    # 均線
+    ma20 = df['close'].rolling(20).mean().iloc[-1]
+    ma60 = df['close'].rolling(60).mean().iloc[-1]
+    
+    # 智能選擇有效支撐線
+    # 如果短期支撐明顯高於中期（箱型上移），用短期
+    if short_support > mid_support * 1.15:
+        effective_support = max(short_support, ma20)
+        support_source = "短期(30天)"
+    # 如果 MA20 高於中期支撐，用 MA20
+    elif ma20 > mid_support * 1.05:
+        effective_support = max(ma20, short_support)
+        support_source = "MA20/短期"
+    else:
+        effective_support = mid_support
+        support_source = "中期(90天)"
+    
+    # 壓力線取中期（較穩定）
+    effective_resistance = mid_resistance
+    
+    # 計算在綜合箱型中的位置
+    box_range = effective_resistance - effective_support
     if box_range <= 0:
         box_range = current * 0.1
-    position = (current - support) / box_range
+    
+    position = (current - effective_support) / box_range
     position = max(0, min(1, position))
-    if current < support * 0.97:
-        stage = "breakdown"
-    elif current > resistance * 1.03:
-        stage = "breakup"
-    elif position < 0.15:
-        stage = "low_buy"
-    elif position > 0.85:
-        stage = "high_sell"
-    else:
-        stage = "watch"
+    
     return {
-        'support': round(support, 2),
-        'resistance': round(resistance, 2),
         'current': round(current, 2),
+        'short_support': round(short_support, 2),
+        'short_resistance': round(short_resistance, 2),
+        'mid_support': round(mid_support, 2),
+        'mid_resistance': round(mid_resistance, 2),
+        'long_support': round(long_support, 2),
+        'long_resistance': round(long_resistance, 2),
+        'ma20': round(ma20, 2),
+        'ma60': round(ma60, 2),
+        'effective_support': round(effective_support, 2),
+        'effective_resistance': round(effective_resistance, 2),
+        'support_source': support_source,
         'position': round(position, 3),
-        'stage': stage,
     }
 
-def get_stage_emoji(stage):
-    return {"low_buy": "🟢", "high_sell": "🔴", "watch": "🟡",
-            "breakup": "📈", "breakdown": "📉"}.get(stage, "⚪")
+def get_multi_timeframe_stage(multi_result):
+    """根據多時間框架判斷階段"""
+    position = multi_result['position']
+    current = multi_result['current']
+    effective_support = multi_result['effective_support']
+    
+    # 止損檢查
+    if current < effective_support * 0.95:
+        return "breakdown", "跌破有效支撐"
+    
+    # 突破檢查
+    if current > multi_result['effective_resistance'] * 1.03:
+        return "breakup", "突破壓力線"
+    
+    # 位置判斷
+    if position < 0.15:
+        return "low_buy", "低買區"
+    elif position > 0.85:
+        return "high_sell", "高賣區"
+    else:
+        return "watch", "觀望區"
 
-def get_stage_description(stage):
-    return {"low_buy": "低買區", "high_sell": "高賣區", "watch": "觀望區",
-            "breakup": "向上突破", "breakdown": "跌破支撐"}.get(stage, "未知")
-
-# ==================== 真實 ADR（接入 NYSE/NASDAQ）====================
+# ==================== 真實 ADR ====================
 def fetch_nyse_advances_declines():
-    """
-    抓取 NYSE/NASDAQ 漲跌家數估算真實 ADR
-    使用多指數綜合判斷市場情緒
-    """
     try:
-        indices = {
-            'NYSE': '^NYA',
-            'NASDAQ': '^IXIC',
-            'S&P500': '^GSPC',
-            'DOW': '^DJI',
-            'RUSSELL': '^RUT'
-        }
-        
+        indices = {'NYSE': '^NYA', 'NASDAQ': '^IXIC', 'S&P500': '^GSPC', 'DOW': '^DJI', 'RUSSELL': '^RUT'}
         advances = 0
         declines = 0
         total = 0
@@ -160,10 +198,6 @@ def get_adr_status(adr_value):
 
 # ==================== 止損機制 ====================
 def check_stop_loss(current_price, support_line, stop_loss_pct=STOP_LOSS_PCT):
-    """
-    檢查是否觸及止損
-    跌破支撐線 5% 自動提醒止損
-    """
     stop_price = support_line * (1 - stop_loss_pct)
     if current_price < stop_price:
         return {
@@ -175,10 +209,6 @@ def check_stop_loss(current_price, support_line, stop_loss_pct=STOP_LOSS_PCT):
 
 # ==================== 成交量確認 ====================
 def check_volume_confirmation(df, lookback=20):
-    """
-    突破時檢查成交量是否放大
-    回傳：(是否放量, 成交量倍數)
-    """
     if df is None or len(df) < lookback + 5:
         return False, 0.0
     
@@ -193,70 +223,51 @@ def check_volume_confirmation(df, lookback=20):
 
 # ==================== 回測功能 ====================
 def backtest_box_strategy(ticker, info, period="2y"):
-    """
-    回測箱型策略在過去 1-2 年的表現
-    回傳：勝率、平均報酬、最大回撤
-    """
     print(f"\n📈 回測: {ticker} ({info.get('name', '')}) - 過去 {period}")
     print("-" * 40)
     
     df = fetch_stock_data(ticker, period=period)
     if df is None or len(df) < 200:
-        print("   ❌ 資料不足，無法回測")
+        print("   ❌ 資料不足")
         return None
     
     signals = []
-    position = None
-    entry_price = 0
-    entry_date = None
     
-    # 每 5 天檢查一次，90 天窗口
     for i in range(90, len(df) - 30, 5):
         window = df.iloc[i-90:i]
         current = df['close'].iloc[i]
-        current_date = df.index[i]
+        
+        # 用多時間框架邏輯回測
+        short = window.tail(30)
+        short_support = np.percentile(short['low'].values, 5)
+        mid_support = np.percentile(window['low'].values, 3)
+        ma20 = window['close'].rolling(20).mean().iloc[-1]
+        
+        if short_support > mid_support * 1.15:
+            effective_support = max(short_support, ma20)
+        elif ma20 > mid_support * 1.05:
+            effective_support = max(ma20, short_support)
+        else:
+            effective_support = mid_support
         
         resistance = np.percentile(window['high'].values, 97)
-        support = np.percentile(window['low'].values, 3)
         
-        # 買進信號：接近支撐線
-        if current < support * 1.05 and position is None:
-            position = 'long'
-            entry_price = current
-            entry_date = current_date
-            
-            # 計算 30 天後報酬
+        # 買進信號：接近有效支撐
+        if current < effective_support * 1.05:
             future_idx = min(i + 30, len(df) - 1)
             future_price = df['close'].iloc[future_idx]
-            ret = (future_price - entry_price) / entry_price * 100
+            ret = (future_price - current) / current * 100
             
             signals.append({
-                'type': 'buy',
-                'entry_price': round(entry_price, 2),
-                'entry_date': entry_date.strftime('%Y-%m-%d'),
+                'entry_price': round(current, 2),
                 'exit_price': round(future_price, 2),
                 'return': round(ret, 2)
             })
-            
-            position = None  # 簡化：持有 30 天後自動平倉
-        
-        # 止損檢查
-        elif position == 'long' and current < support * 0.95:
-            ret = (current - entry_price) / entry_price * 100
-            signals.append({
-                'type': 'stop_loss',
-                'entry_price': round(entry_price, 2),
-                'entry_date': entry_date.strftime('%Y-%m-%d'),
-                'exit_price': round(current, 2),
-                'return': round(ret, 2)
-            })
-            position = None
     
     if not signals:
-        print("   ⚠️ 過去期間內無明確交易信號")
+        print("   ⚠️ 無明確交易信號")
         return None
     
-    # 計算績效
     returns = [s['return'] for s in signals]
     wins = sum(1 for r in returns if r > 0)
     total = len(returns)
@@ -269,14 +280,12 @@ def backtest_box_strategy(ticker, info, period="2y"):
         'avg_return': round(np.mean(returns), 2),
         'max_return': round(max(returns), 2) if returns else 0,
         'min_return': round(min(returns), 2) if returns else 0,
-        'signals': signals
     }
     
-    print(f"   總交易次數: {total}")
+    print(f"   交易次數: {total}")
     print(f"   勝率: {result['win_rate']}%")
     print(f"   平均報酬: {result['avg_return']}%")
-    print(f"   最佳交易: +{result['max_return']}%")
-    print(f"   最差交易: {result['min_return']}%")
+    print(f"   最佳: +{result['max_return']}% | 最差: {result['min_return']}%")
     
     return result
 
@@ -304,66 +313,70 @@ def send_email(subject, body):
 
 def format_daily_report(results, adr_info=None):
     now = datetime.now().strftime("%Y/%m/%d %H:%M")
-    lines = [f"📊 波段管家日報（強化版）{now}", "=" * 40]
+    lines = [f"📊 波段管家日報（多時間框架版）{now}", "=" * 45]
     
     if adr_info:
         lines.append(f"🌡️ 市場情緒 (真實 ADR): {adr_info['emoji']} {adr_info['adr']:.2f}")
         lines.append(f"   {adr_info['description']}")
         lines.append(f"   💡 {adr_info['action']}")
     
-    # 止損提醒優先顯示
+    # 止損提醒優先
     stop_loss = [r for r in results if r.get('stop_loss_alert')]
     if stop_loss:
         lines.append("\n🚨【止損提醒 - 立即行動】")
         for r in stop_loss:
             lines.append(f"   {r['ticker']} ({r['name']})")
             lines.append(f"   現價: ${r['current']:.2f} | 止損價: ${r['stop_price']}")
-            lines.append(f"   已跌破支撐線 5%，建議立即止損！")
+            lines.append(f"   已跌破有效支撐 5%，建議立即止損！")
     
     lines.append("\n📈 個股分析:")
-    lines.append("-" * 40)
+    lines.append("-" * 45)
     
     for r in results:
         lines.append(f"\n{r['stage_emoji']} {r['ticker']} ({r['name']})")
         lines.append(f"   現價: ${r['current']:.2f}")
-        lines.append(f"   支撐: ${r['support']:.2f} | 壓力: ${r['resistance']:.2f}")
+        
+        # 多時間框架支撐
+        lines.append(f"   📊 支撐參考:")
+        lines.append(f"      短期(30天): ${r['short_support']:.2f}")
+        lines.append(f"      中期(90天): ${r['mid_support']:.2f}")
+        lines.append(f"      MA20: ${r['ma20']:.2f}")
+        lines.append(f"   ✅ 有效支撐: ${r['effective_support']:.2f} ({r['support_source']})")
+        lines.append(f"   壓力線: ${r['effective_resistance']:.2f}")
         lines.append(f"   位置: {r['position']*100:.1f}% | 狀態: {r['stage_desc']}")
         
-        # 成交量確認
+        # 成交量
         if 'volume_ratio' in r:
             if r.get('volume_confirmed'):
-                lines.append(f"   ✅ 成交量確認: {r['volume_ratio']}倍放量")
+                lines.append(f"   ✅ 成交量: {r['volume_ratio']}倍放量")
             else:
-                lines.append(f"   📊 成交量: {r['volume_ratio']}倍 (未達 1.5 倍門檻)")
+                lines.append(f"   📊 成交量: {r['volume_ratio']}倍")
         
-        # 具體建議
+        # 建議
         if r.get('stop_loss_alert'):
-            lines.append(f"   🚨 建議: 止損！已跌破支撐線 5%")
+            lines.append(f"   🚨 建議: 止損！")
         elif r['stage'] == 'low_buy':
-            lines.append(f"   ✅ 建議: 接近支撐線，可觀察買進機會")
+            lines.append(f"   ✅ 建議: 接近{r['support_source']}支撐，可觀察買進")
         elif r['stage'] == 'high_sell':
-            lines.append(f"   ⚠️ 建議: 接近壓力線，考慮獲利減碼")
+            lines.append(f"   ⚠️ 建議: 接近壓力線，考慮減碼")
         elif r['stage'] == 'breakup' and r.get('volume_confirmed'):
             lines.append(f"   📈 建議: 放量突破，順勢操作")
-        elif r['stage'] == 'breakup' and not r.get('volume_confirmed'):
+        elif r['stage'] == 'breakup':
             lines.append(f"   ⚠️ 建議: 突破但成交量不足，觀望確認")
         elif r['stage'] == 'breakdown':
-            lines.append(f"   📉 建議: 跌破箱型，注意風險/止損")
+            lines.append(f"   📉 建議: 跌破箱型，注意風險")
         else:
             lines.append(f"   ⏳ 建議: 觀望，等待觸及關鍵價位")
     
-    lines.append("\n" + "=" * 40)
+    lines.append("\n" + "=" * 45)
     lines.append("💡 心法: 不焦急、不貪心，等待股價來到購買區")
     lines.append("📚 來源: 上岡正明《低買高賣的波段操盤術》")
-    lines.append("🔧 強化功能: 真實 ADR | 回測驗證 | 止損機制 | 成交量確認")
+    lines.append("🔧 多時間框架 | 真實 ADR | 回測 | 止損 | 成交量確認")
     return "\n".join(lines)
 
 def format_backtest_report(backtest_results):
-    """格式化回測報告"""
     now = datetime.now().strftime("%Y/%m/%d")
     lines = [f"📊 波段管家 - 回測報告 {now}", "=" * 40]
-    lines.append("過去 2 年箱型策略績效驗證")
-    lines.append("-" * 40)
     
     total_wins = 0
     total_trades = 0
@@ -376,7 +389,6 @@ def format_backtest_report(backtest_results):
         lines.append(f"   勝率: {result['win_rate']}%")
         lines.append(f"   平均報酬: {result['avg_return']}%")
         lines.append(f"   最佳: +{result['max_return']}% | 最差: {result['min_return']}%")
-        
         total_wins += int(result['win_rate'] * result['total_signals'] / 100)
         total_trades += result['total_signals']
     
@@ -389,29 +401,38 @@ def format_backtest_report(backtest_results):
     return "\n".join(lines)
 
 # ==================== 主程式 ====================
+def get_stage_emoji(stage):
+    return {"low_buy": "🟢", "high_sell": "🔴", "watch": "🟡",
+            "breakup": "📈", "breakdown": "📉"}.get(stage, "⚪")
+
 def analyze_single_stock(ticker, info):
     print(f"\n📊 分析: {ticker} ({info.get('name', '')})")
-    df = fetch_stock_data(ticker, period="6mo")
+    df = fetch_stock_data(ticker, period="1y")
     if df is None:
         print("   ❌ 無法取得資料")
         return None
-    box = analyze_box_pattern(df, period_days=90)
-    if box is None:
+    
+    multi = analyze_multi_timeframe(df)
+    if multi is None:
         return None
+    
+    stage, stage_desc = get_multi_timeframe_stage(multi)
+    
     result = {
         'ticker': ticker,
         'name': info.get('name', ticker),
-        **box,
-        'stage_emoji': get_stage_emoji(box['stage']),
-        'stage_desc': get_stage_description(box['stage']),
+        **multi,
+        'stage': stage,
+        'stage_emoji': get_stage_emoji(stage),
+        'stage_desc': stage_desc,
     }
     
     # 止損檢查
-    stop_check = check_stop_loss(result['current'], result['support'])
+    stop_check = check_stop_loss(result['current'], result['effective_support'])
     if stop_check['triggered']:
         result['stop_loss_alert'] = True
         result['stop_price'] = stop_check['stop_price']
-        print(f"   🚨 止損提醒：跌破支撐線 5%！止損價 ${stop_check['stop_price']}")
+        print(f"   🚨 止損提醒：跌破有效支撐 5%！止損價 ${stop_check['stop_price']}")
     else:
         result['stop_loss_alert'] = False
     
@@ -419,22 +440,21 @@ def analyze_single_stock(ticker, info):
     vol_confirmed, vol_ratio = check_volume_confirmation(df)
     result['volume_confirmed'] = vol_confirmed
     result['volume_ratio'] = vol_ratio
-    if result['stage'] in ['breakup', 'breakdown']:
-        if vol_confirmed:
-            print(f"   ✅ 成交量確認：放量 {vol_ratio} 倍")
-        else:
-            print(f"   ⚠️ 成交量不足：僅 {vol_ratio} 倍")
     
     print(f"   現價: ${result['current']:.2f}")
-    print(f"   支撐: ${result['support']:.2f} | 壓力: ${result['resistance']:.2f}")
-    print(f"   位置: {result['position']*100:.1f}%")
-    print(f"   狀態: {result['stage_emoji']} {result['stage_desc']}")
+    print(f"   📊 多時間框架支撐:")
+    print(f"      短期(30天): ${result['short_support']:.2f}")
+    print(f"      中期(90天): ${result['mid_support']:.2f}")
+    print(f"      MA20: ${result['ma20']:.2f}")
+    print(f"   ✅ 有效支撐: ${result['effective_support']:.2f} ({result['support_source']})")
+    print(f"   壓力線: ${result['effective_resistance']:.2f}")
+    print(f"   位置: {result['position']*100:.1f}% | 狀態: {result['stage_emoji']} {result['stage_desc']}")
     
     return result
 
 def run_daily_check():
     print("=" * 60)
-    print("📊 低買高賣波段管家（強化版）")
+    print("📊 低買高賣波段管家（多時間框架版）")
     print(f"🕐 {datetime.now().strftime('%Y/%m/%d %H:%M')}")
     print("=" * 60)
     
@@ -449,7 +469,6 @@ def run_daily_check():
         print("❌ 分析失敗")
         return
     
-    # 真實 ADR
     adr_value = fetch_nyse_advances_declines()
     adr_status = get_adr_status(adr_value)
     adr_info = {'adr': adr_value, **adr_status}
@@ -457,7 +476,6 @@ def run_daily_check():
     print(f"\n🌡️ 市場情緒 (真實 ADR): {adr_info['emoji']} {adr_value:.2f}")
     print(f"   {adr_info['description']} - {adr_info['action']}")
     
-    # 摘要
     print(f"\n{'=' * 60}")
     print("📋 今日摘要")
     print(f"{'=' * 60}")
@@ -470,7 +488,7 @@ def run_daily_check():
     if low_buy:
         print(f"\n🟢 低買區 ({len(low_buy)} 檔):")
         for r in low_buy:
-            print(f"   {r['ticker']}: ${r['current']:.2f}")
+            print(f"   {r['ticker']}: ${r['current']:.2f} (有效支撐 ${r['effective_support']:.2f})")
     
     if high_sell:
         print(f"\n🔴 高賣區 ({len(high_sell)} 檔):")
@@ -491,18 +509,15 @@ def run_daily_check():
     print(f"\n💡 心法: 不焦急、不貪心")
     print(f"{'=' * 60}")
     
-    # 郵件通知
     report = format_daily_report(results, adr_info)
     subject = f"📊 波段管家日報 {datetime.now().strftime('%Y/%m/%d %H:%M')}"
     send_email(subject, report)
 
 def run_backtest():
-    """執行回測"""
     print("=" * 60)
     print("📊 波段管家 - 回測模式")
     print(f"🕐 {datetime.now().strftime('%Y/%m/%d %H:%M')}")
     print("=" * 60)
-    print("驗證過去 2 年箱型策略績效...")
     
     backtest_results = []
     for ticker, info in HOLDINGS.items():
