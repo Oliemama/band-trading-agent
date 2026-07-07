@@ -27,6 +27,7 @@ HOLDINGS = {
     "PLTR": {"market": "US", "name": "Palantir", "type": "high_volatility"},
     "PANW": {"market": "US", "name": "Palo Alto Networks", "type": "stable"},
     "GLW":  {"market": "US", "name": "康寧", "type": "stable"},
+    "MU": {"market": "US", "name": "美光科技", "type": "high_volatility"},
     "1919.HK": {"market": "HK", "name": "中遠海控", "type": "cyclical"},
     "1088.HK": {"market": "HK", "name": "中國神華", "type": "cyclical"},
     "0941.HK": {"market": "HK", "name": "中國移動", "type": "stable"},
